@@ -1,9 +1,9 @@
 module Main exposing (..)
 
 import Browser
-import Html exposing (button, div, h1, h5, hr, input, li, ol, text)
-import Html.Attributes exposing (attribute, class, id, style, tabindex, type_, value, width)
-import Html.Events exposing (onClick, onInput)
+import Html exposing (button, div, h1, h5, hr, input, li, text, ul)
+import Html.Attributes exposing (attribute, checked, class, id, style, tabindex, type_, value, width)
+import Html.Events exposing (onCheck, onClick, onInput)
 import Html5.DragDrop as DragDrop
 import Iso8601
 import List.Extra
@@ -14,6 +14,7 @@ import Time
 type alias Item =
     { description : String
     , createdTime : Maybe Time.Posix
+    , checkedOff : Bool
     }
 
 
@@ -25,6 +26,7 @@ type alias Model =
     { pendingDescription : String
     , items : List Item
     , dragDrop : DragDrop.Model Int BeforeIndex
+    , hideCrossedOffItems : Bool
     }
 
 
@@ -34,6 +36,7 @@ type Msg
     | RemoveItem Int
     | UpdateItem Int Item
     | AddItemTime Item Time.Posix
+    | ToggleHideCrossedOffItems
     | DragDropMsg (DragDrop.Msg Int BeforeIndex)
 
 
@@ -49,7 +52,7 @@ main =
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( { pendingDescription = "", items = [], dragDrop = DragDrop.init }
+    ( { pendingDescription = "", items = [], dragDrop = DragDrop.init, hideCrossedOffItems = False }
     , Cmd.none
     )
 
@@ -57,18 +60,28 @@ init _ =
 view : Model -> Html.Html Msg
 view model =
     let
+        showingItems =
+            List.filter
+                (if model.hideCrossedOffItems then
+                    not << .checkedOff
+
+                 else
+                    always True
+                )
+                model.items
+
         dropId =
             DragDrop.getDropId model.dragDrop
 
         itemsHtml =
             List.Extra.interweave
                 (List.Extra.initialize
-                    (List.length model.items + 1)
+                    (List.length showingItems + 1)
                     (viewDropZone dropId)
                 )
                 (List.indexedMap
                     viewItem
-                    model.items
+                    showingItems
                 )
     in
     div []
@@ -78,20 +91,52 @@ view model =
             , Html.Attributes.class "btn btn-primary"
             , onClick <|
                 AddItem
-                    { description = model.pendingDescription, createdTime = Nothing }
+                    { description = model.pendingDescription, createdTime = Nothing, checkedOff = False }
             ]
             [ text "+" ]
         , input [ onInput UpdatePendingDescription, value model.pendingDescription ] []
-        , ol [] itemsHtml
+        , button [ class "ms-4", onClick ToggleHideCrossedOffItems ]
+            [ text
+                ((if model.hideCrossedOffItems then
+                    "Show"
+
+                  else
+                    "Hide"
+                 )
+                    ++ " crossed off items"
+                )
+            ]
+        , ul [ class "list-group" ] itemsHtml
         ]
 
 
 viewItem : Int -> Item -> Html.Html Msg
 viewItem i item =
-    li (DragDrop.draggable DragDropMsg i)
+    li
+        (class "list-group-item" :: DragDrop.draggable DragDropMsg i)
         [ div []
-            [ button [ onClick <| RemoveItem i ] [ text "-" ]
-            , input [ onInput <| \s -> UpdateItem i { item | description = s }, value <| item.description ] []
+            [ input
+                [ type_ "checkbox"
+                , class "form-check-input me-1"
+                , checked item.checkedOff
+                , onCheck (\checked -> UpdateItem i { item | checkedOff = checked })
+                ]
+                []
+            , input
+                ([ onInput <|
+                    \s -> UpdateItem i { item | description = s }
+                 , value <|
+                    item.description
+                 ]
+                    ++ (if item.checkedOff then
+                            [ style "color" "grey", style "text-decoration" "line-through" ]
+
+                        else
+                            []
+                       )
+                )
+                []
+            , button [ onClick <| RemoveItem i ] [ text "-" ]
             , button
                 [ type_ "button"
                 , attribute "data-bs-toggle" "modal"
@@ -198,6 +243,14 @@ update msg model =
 
                         Just ( draggingIndex, droppingBeforeIndex, _ ) ->
                             moveFrom draggingIndex droppingBeforeIndex model.items
+              }
+            , Cmd.none
+            )
+
+        ToggleHideCrossedOffItems ->
+            ( { model
+                | hideCrossedOffItems = not model.hideCrossedOffItems
+                , items = List.filter (not << .checkedOff) model.items ++ List.filter .checkedOff model.items
               }
             , Cmd.none
             )
