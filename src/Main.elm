@@ -52,7 +52,11 @@ main =
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( { pendingDescription = "", items = [], dragDrop = DragDrop.init, hideCrossedOffItems = False }
+    ( { pendingDescription = ""
+      , items = []
+      , dragDrop = DragDrop.init
+      , hideCrossedOffItems = False
+      }
     , Cmd.none
     )
 
