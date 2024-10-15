@@ -1,12 +1,18 @@
 module Main exposing (..)
 
 import Browser
+import Element.Region exposing (description)
+import Environment
+import Firestore
+import Firestore.Codec as Codec
+import Firestore.Config as Config
 import Html exposing (button, div, h1, h5, hr, input, li, text, ul)
 import Html.Attributes exposing (attribute, checked, class, id, style, tabindex, type_, value, width)
 import Html.Events exposing (onCheck, onClick, onInput)
 import Html5.DragDrop as DragDrop
 import Iso8601
 import List.Extra
+import Result.Extra as ExResult
 import Task
 import Time
 
@@ -27,17 +33,24 @@ type alias Model =
     , items : List Item
     , dragDrop : DragDrop.Model Int BeforeIndex
     , hideCrossedOffItems : Bool
+    , firestore : Firestore.Firestore
     }
 
 
+type alias UserSettings =
+    { hideCrossedOffItems : Bool }
+
+
 type Msg
-    = AddItem Item
+    = Noop
+    | AddItem Item
     | UpdatePendingDescription String
     | RemoveItem Int
     | UpdateItem Int Item
     | AddItemTime Item Time.Posix
     | ToggleHideCrossedOffItems
     | DragDropMsg (DragDrop.Msg Int BeforeIndex)
+    | GotUserSettings (Result Firestore.Error (Firestore.Document UserSettings))
 
 
 main : Program () Model Msg
@@ -52,13 +65,58 @@ main =
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( { pendingDescription = ""
+    let
+        firestore =
+            Config.new
+                { apiKey = Environment.apiKey
+                , project = Environment.project
+                }
+                |> Firestore.init
+    in
+    ( { firestore = firestore
+      , pendingDescription = ""
       , items = []
       , dragDrop = DragDrop.init
       , hideCrossedOffItems = False
       }
-    , Cmd.none
+    , Cmd.batch
+        [ firestore
+            |> Firestore.root
+            |> Firestore.collection "users"
+            |> Firestore.document "jamin"
+            |> Firestore.build
+            |> ExResult.toTask
+            |> Task.andThen (Firestore.get (Codec.asDecoder hideCrossedOffItemsCodec))
+            |> Task.attempt GotUserSettings
+
+        -- , firestore
+        --     |> Firestore.root
+        --     |> Firestore.collection "users"
+        --     |> Firestore.document "jamin"
+        --     |> Firestore.subCollection "todos"
+        --     |> Firestore.build
+        --     |> ExResult.toTask
+        --     |> Task.andThen (Firestore.get (Codec.asDecoder itemCodec))
+        --     |> Task.attempt GotUserSettings
+        ]
     )
+
+
+hideCrossedOffItemsCodec : Codec.Codec UserSettings
+hideCrossedOffItemsCodec =
+    Codec.document UserSettings
+        |> Codec.required "hideCrossedOffItems" .hideCrossedOffItems Codec.bool
+        |> Codec.build
+
+
+itemCodec : Codec.Codec Item
+itemCodec =
+    Codec.document Item
+        |> Codec.required "description" .description Codec.string
+        |> Codec.required "createdTime" .createdTime (Codec.maybe Codec.timestamp)
+        -- TODO timestamp may not be populated and we may want to wait before sending to Firestore
+        |> Codec.required "checkedOff" .checkedOff Codec.bool
+        |> Codec.build
 
 
 view : Model -> Html.Html Msg
@@ -204,6 +262,9 @@ viewItemDetailsModal i item =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        Noop ->
+            ( model, Cmd.none )
+
         AddItem item ->
             ( { model | pendingDescription = "" }
             , Task.perform (AddItemTime item) Time.now
@@ -252,25 +313,54 @@ update msg model =
             )
 
         ToggleHideCrossedOffItems ->
-            ( { model
-                | hideCrossedOffItems = not model.hideCrossedOffItems
-                , items = List.filter (not << .checkedOff) model.items ++ List.filter .checkedOff model.items
-              }
-            , Cmd.none
+            let
+                newModel =
+                    { model
+                        | hideCrossedOffItems = not model.hideCrossedOffItems
+                        , items = List.filter (not << .checkedOff) model.items ++ List.filter .checkedOff model.items
+                    }
+            in
+            ( newModel
+            , updateUserSettings newModel.firestore { hideCrossedOffItems = newModel.hideCrossedOffItems }
             )
+
+        GotUserSettings res ->
+            case res of
+                Ok doc ->
+                    ( { model | hideCrossedOffItems = doc.fields.hideCrossedOffItems }, Cmd.none )
+
+                Err e ->
+                    let
+                        _ =
+                            Debug.log "A firestore error occurred" e
+                    in
+                    ( model, Cmd.none )
+
+
+updateUserSettings : Firestore.Firestore -> UserSettings -> Cmd Msg
+updateUserSettings firestore userSettings =
+    firestore
+        |> Firestore.root
+        |> Firestore.collection "users"
+        |> Firestore.document "jamin"
+        |> Firestore.build
+        |> ExResult.toTask
+        |> Task.andThen
+            (Firestore.upsert
+                (Codec.asDecoder hideCrossedOffItemsCodec)
+                (Codec.asEncoder hideCrossedOffItemsCodec userSettings)
+            )
+        |> Task.attempt GotUserSettings
 
 
 {-| moves the element from the given original index to the new location before a given index
-
 if either index is out of bounds, the original list is returned
-
 moveFrom 0 (BeforeIndex 1) [1, 2] -> [1, 2]
 moveFrom 0 (BeforeIndex 2) [1, 2, 3] -> [2, 1, 3]
 moveFrom 0 (BeforeIndex 3) [1, 2, 3] -> [2, 3, 1]
 moveFrom 2 (BeforeIndex 0) [1, 2, 3] -> [3, 1, 2]
 moveFrom 2 (BeforeIndex 1) [1, 2, 3] -> [1, 3, 2]
 moveFrom 2 (BeforeIndex 2) [1, 2, 3] -> [1, 2, 3]
-
 -}
 moveFrom : Int -> BeforeIndex -> List a -> List a
 moveFrom originalIndex (BeforeIndex beforeIndex) xs =
@@ -302,3 +392,57 @@ insertBefore (BeforeIndex 3) 4 [1, 2, 3] -> [1, 2, 3, 4]
 insertBefore : BeforeIndex -> a -> List a -> List a
 insertBefore (BeforeIndex i) x xs =
     List.take i xs ++ x :: List.drop i xs
+
+
+
+-- -- GitHub: update time -> add todo.yaml
+-- -- you: update time -> make fixes
+-- Import the component
+-- codecOneOf : List ( String, a ) -> (a -> String) -> Codec.Field a
+-- codecOneOf options show =
+--     case options of
+--         [] ->
+--             Codec.fail "None matched"
+--         ( expected, wouldProduce ) :: rest ->
+--             Codec.string
+--                 |> Codec.andThen
+--                     (\actual ->
+--                         if expected == actual then
+--                             Codec.succeed wouldProduce
+--                         else
+--                             codecOneOf rest show
+--                     )
+--                     show
+-- codecOneOf : (a -> String) -> List ( String, a ) -> Codec.Field a
+-- codecOneOf show =
+--     let
+--         tryCodec ( expected, wouldProduce ) restCodec =
+--             Codec.string
+--                 |> Codec.andThen
+--                     (\actual ->
+--                         if expected == actual then
+--                             Codec.succeed wouldProduce
+--                         else
+--                             restCodec
+--                     )
+--                     show
+--     in
+--     List.foldr tryCodec (Codec.fail "None matched")
+
+
+codecOneOf : (a -> b) -> Codec.Field b -> List ( b, a ) -> Codec.Field a
+codecOneOf show codec =
+    let
+        tryCodec ( expected, wouldProduce ) restCodec =
+            codec
+                |> Codec.andThen
+                    (\actual ->
+                        if expected == actual then
+                            Codec.succeed wouldProduce
+
+                        else
+                            restCodec
+                    )
+                    show
+    in
+    List.foldr tryCodec (Codec.fail "None matched")

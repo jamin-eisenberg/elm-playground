@@ -5,3 +5,5 @@ repl-temp-*
 
 .DS_Store
 elm.js
+
+src/Environment.elm
